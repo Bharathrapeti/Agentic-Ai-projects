@@ -21,6 +21,8 @@ database.init_db()
 
 st.markdown("""<style>
 .block-container {max-width: 1220px; padding-top: 1.5rem;}
+/* Keep the workspace focused on the interview instead of deployment controls. */
+.stDeployButton, [data-testid="stAppDeployButton"] {display: none !important;}
 .hero {padding: 2rem 2.2rem; border-radius: 22px; background: linear-gradient(120deg,#172554,#312e81 55%,#4338ca); color:white; margin-bottom:1.2rem; box-shadow:0 14px 35px rgba(30,41,99,.18);}
 .hero h1 {font-size:2.4rem; margin-bottom:.35rem;}
 .hero p {font-size:1.05rem; opacity:.9; margin:0;}
