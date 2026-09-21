@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #334155; }
+    body { margin: 0; }
+    .box { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px 14px; background: #f8fafc; }
+    .state { font-size: 0.9rem; font-weight: 600; }
+    .hint { margin-top: 5px; color: #64748b; font-size: 0.78rem; }
+    button { border: 0; border-radius: 8px; padding: 8px 12px; background: #2563eb; color: white; cursor: pointer; margin-top: 9px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div id="state" class="state">Starting hands-free mode…</div>
+    <div class="hint">Allow microphone access. The browser submits your answer after a pause.</div>
+    <button id="retry">Start microphone now</button>
+  </div>
+  <script>
+    const state = document.getElementById("state");
+    const retry = document.getElementById("retry");
+    let args = {}, speaking = false, listening = false, handled = false;
+    let lastReplay = null;
+    let audioContext, source, processor, stream, samples = [], startedAt = 0;
+    let speakingDetected = false, lastVoiceAt = 0, levelTimer = null;
+    let speakFallbackTimer = null;
+
+    function send(type, extra = {}) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setComponentValue",
+        value: {type, ...extra, at: Date.now()}
+      }, "*");
+    }
+    function setState(text, canRetry = true) {
+      state.textContent = text;
+      retry.hidden = !canRetry;
+    }
+    function encodeWav(input, sampleRate) {
+      const buffer = new ArrayBuffer(44 + input.length * 2);
+      const view = new DataView(buffer);
+      const write = (offset, text) => [...text].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+      write(0, "RIFF"); view.setUint32(4, 36 + input.length * 2, true); write(8, "WAVE");
+      write(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+      write(36, "data"); view.setUint32(40, input.length * 2, true);
+      input.forEach((value, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, value)) * 0x7fff, true));
+      let binary = ""; const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(binary);
+    }
+    async function listen() {
+      if (!args.active || listening || speaking) return;
+      if (handled) return;
+      try {
+        if (!stream) {
+          stream = await navigator.mediaDevices.getUserMedia({audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1
+          }});
+          audioContext = new AudioContext();
+          source = audioContext.createMediaStreamSource(stream);
+          processor = audioContext.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = event => {
+            if (!listening) return;
+            const data = event.inputBuffer.getChannelData(0);
+            samples.push(...data);
+            let sum = 0; for (const value of data) sum += value * value;
+            const level = Math.sqrt(sum / data.length);
+            if (level > 0.006) { speakingDetected = true; lastVoiceAt = Date.now(); }
+            state.textContent = speakingDetected
+              ? "Hearing you… microphone active"
+              : "Listening… start speaking (mic level " + level.toFixed(3) + ")";
+            if (speakingDetected && Date.now() - lastVoiceAt > 1600 && Date.now() - startedAt > 900) stopListening();
+          };
+          const silentOutput = audioContext.createGain();
+          silentOutput.gain.value = 0;
+          source.connect(processor); processor.connect(silentOutput); silentOutput.connect(audioContext.destination);
+        }
+        if (audioContext.state === "suspended") await audioContext.resume();
+        samples = []; speakingDetected = false; startedAt = Date.now(); lastVoiceAt = startedAt; listening = true;
+        setState("Listening… start speaking. I’ll stop after you pause.");
+      } catch (error) {
+        setState("Microphone could not start. Allow access and press Start / retry microphone.", true);
+      }
+    }
+    function stopListening() {
+      if (!listening || handled) return;
+      listening = false;
+      const sampleRate = audioContext ? audioContext.sampleRate : 44100;
+      if (samples.length < 3000) { setState("No speech level detected. Press Start / retry microphone.", true); return; }
+      handled = true; setState("Answer captured. Converting to text…");
+      send("answer", {audio: encodeWav(samples, sampleRate)});
+    }
+    function speak(text) {
+      if (!text || !window.speechSynthesis) { listen(); return; }
+      window.speechSynthesis.cancel();
+      speaking = true;
+      setState("Interviewer is speaking…");
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 0.96;
+      clearTimeout(speakFallbackTimer);
+      speakFallbackTimer = setTimeout(() => {
+        if (speaking) {
+          speaking = false;
+          setState("Microphone starting… please wait, then speak.");
+          listen();
+        }
+      }, Math.max(9000, text.length * 85));
+      utterance.onend = () => {
+        clearTimeout(speakFallbackTimer);
+        speaking = false;
+        setState("Microphone starting… please wait, then speak.");
+        // Let speaker audio and browser audio buffers drain before opening the mic.
+        setTimeout(listen, 1600);
+      };
+      utterance.onerror = () => {
+        clearTimeout(speakFallbackTimer);
+        speaking = false;
+        setState("Microphone starting… please wait, then speak.");
+        setTimeout(listen, 1600);
+      };
+      window.speechSynthesis.speak(utterance);
+    }
+    function render(data) {
+      args = data.args || {};
+      if (!args.active) { window.speechSynthesis.cancel(); if (listening) stopListening(); setState("Live mode is paused."); return; }
+      if (lastReplay === args.replay && speaking) return;
+      lastReplay = args.replay;
+      handled = false;
+      const greeting = args.greeting || "";
+      speak(greeting ? greeting + " " + args.question : args.question);
+    }
+    retry.onclick = () => {
+      handled = false;
+      window.speechSynthesis.cancel();
+      speaking = false;
+      if (listening) stopListening();
+      listen();
+    };
+    window.addEventListener("message", event => {
+      if (!event.data || event.data.type !== "streamlit:render") return;
+      render(event.data);
+    });
+    window.addEventListener("load", () => {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:componentReady",
+        apiVersion: 1
+      }, "*");
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setFrameHeight",
+        height: 112
+      }, "*");
+    });
+  </script>
+</body>
+</html>
