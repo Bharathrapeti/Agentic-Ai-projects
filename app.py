@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import secrets
+import smtplib
 import streamlit as st
+from email.message import EmailMessage
+from datetime import datetime, timedelta, timezone
 
 import ai_service
 import capture
@@ -47,6 +52,118 @@ def opening_question(name: str, role: str) -> str:
     )
 
 
+def login_view():
+    st.markdown(
+        '<div class="hero"><h1>🎯 Welcome to Interview Coach</h1>'
+        '<p>Sign in to save your practice sessions, feedback, and progress.</p></div>',
+        unsafe_allow_html=True,
+    )
+    login_tab, register_tab = st.tabs(["Sign in", "Create account"])
+    with login_tab:
+        with st.form("login"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        if submitted:
+            user_id = database.authenticate_user(username, password)
+            if user_id is None:
+                st.error("Incorrect username or password.")
+            else:
+                st.session_state.auth_user_id = user_id
+                st.session_state.auth_name = username.strip()
+                st.rerun()
+    with register_tab:
+        pending = st.session_state.get("pending_registration")
+        if not pending:
+            with st.form("register"):
+                username = st.text_input("Choose a username", key="register_username")
+                email = st.text_input("Email address", key="register_email")
+                password = st.text_input("Create a password", type="password", key="register_password")
+                confirm = st.text_input("Confirm password", type="password", key="register_confirm")
+                submitted = st.form_submit_button("Send verification OTP", type="primary", use_container_width=True)
+            if submitted:
+                if password != confirm:
+                    st.error("The passwords do not match.")
+                elif not username.strip() or "@" not in email:
+                    st.error("Enter a username and a valid email address.")
+                else:
+                    otp = f"{secrets.randbelow(1_000_000):06d}"
+                    try:
+                        _send_otp_email(email.strip(), otp)
+                    except (OSError, smtplib.SMTPException) as error:
+                        st.error(f"Could not send the verification email: {error}")
+                    else:
+                        st.session_state.pending_registration = {
+                            "username": username.strip(),
+                            "email": email.strip().lower(),
+                            "password": password,
+                            "otp": otp,
+                            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+                        }
+                        st.rerun()
+        else:
+            st.info(f"We sent a 6-digit verification code to {pending['email']}.")
+            with st.form("verify_registration"):
+                otp = st.text_input("Verification OTP", max_chars=6)
+                verified = st.form_submit_button("Verify and create account", type="primary", use_container_width=True)
+            if verified:
+                expired = datetime.now(timezone.utc) >= datetime.fromisoformat(pending["expires_at"])
+                if expired:
+                    st.error("This OTP has expired. Start registration again.")
+                elif not secrets.compare_digest(otp.strip(), pending["otp"]):
+                    st.error("Incorrect OTP.")
+                else:
+                    user_id, error = database.create_login_user(
+                        pending["username"], pending["email"], pending["password"]
+                    )
+                    if error:
+                        st.error(error)
+                    else:
+                        st.session_state.pop("pending_registration", None)
+                        st.session_state.auth_user_id = user_id
+                        st.session_state.auth_name = pending["username"]
+                        st.rerun()
+            if st.button("Start registration again"):
+                st.session_state.pop("pending_registration", None)
+                st.rerun()
+
+
+def _send_otp_email(recipient: str, otp: str) -> None:
+    def setting(name: str, default: str = "") -> str:
+        value = os.getenv(name)
+        if value:
+            return value
+        try:
+            return str(st.secrets.get(name, default))
+        except (FileNotFoundError, KeyError):
+            return default
+
+    host = setting("SMTP_HOST")
+    port = int(setting("SMTP_PORT", "587"))
+    username = setting("SMTP_USERNAME")
+    password = setting("SMTP_PASSWORD")
+    sender = setting("SMTP_FROM", username)
+    if not host or not username or not password or not sender:
+        raise OSError(
+            "Email is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, "
+            "SMTP_PASSWORD, and SMTP_FROM, then restart Streamlit."
+        )
+    message = EmailMessage()
+    message["Subject"] = "Interview Coach verification code"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(f"Your Interview Coach verification code is {otp}. It expires in 10 minutes.")
+    if port == 465:
+        server_context = smtplib.SMTP_SSL(host, port, timeout=15)
+    else:
+        server_context = smtplib.SMTP(host, port, timeout=15)
+    with server_context as server:
+        if port != 465:
+            server.starttls()
+        server.login(username, password)
+        server.send_message(message)
+
+
 def setup_view():
     st.markdown(
         '<div class="hero"><h1>🎯 Your next interview starts here</h1>'
@@ -57,9 +174,32 @@ def setup_view():
     f1.markdown('<div class="feature-card"><strong>🎙️ Real conversation</strong><span>Speak naturally with hands-free voice mode and live camera practice.</span></div>', unsafe_allow_html=True)
     f2.markdown('<div class="feature-card"><strong>🧠 Personal coaching</strong><span>Get targeted feedback, follow-up questions, and practical next steps.</span></div>', unsafe_allow_html=True)
     f3.markdown('<div class="feature-card"><strong>📈 Track your growth</strong><span>Save your attempts and see how your interview performance improves.</span></div>', unsafe_allow_html=True)
+    st.subheader("📹 Camera pre-check")
+    st.caption("Camera access is required for every interview. Start the preview, check your framing and lighting, then confirm before continuing.")
+    camera_ready = False
+    if WEBRTC_AVAILABLE:
+        camera_context = capture.live_stream("camera_precheck", audio=False)
+        camera_ready = bool(camera_context and camera_context.state.playing)
+        if camera_ready:
+            st.success("Camera is active and ready.")
+        else:
+            st.warning("Click START on the camera preview and allow browser camera permission.")
+    else:
+        camera_photo = st.camera_input("Take a camera check photo", key="camera_precheck_photo")
+        camera_ready = camera_photo is not None
+        if not camera_ready:
+            st.warning("Take a camera check photo before starting the interview.")
+    camera_confirmed = st.checkbox(
+        "I have checked my camera framing, lighting, and eye contact.",
+        disabled=not camera_ready,
+        key="camera_confirmed",
+    )
+    camera_ready = camera_ready and camera_confirmed
+    if camera_ready:
+        st.success("Camera pre-check passed. You can start the interview.")
     st.markdown('<div class="section-card"><h3>Build your practice session</h3><p class="muted">Tell the coach what you want to practise. You can change these settings for every attempt.</p></div>', unsafe_allow_html=True)
     with st.form("setup"):
-        name = st.text_input("👋 What should the interviewer call you?", placeholder="e.g. Bharath")
+        name = st.text_input("👋 What should the interviewer call you?", value=st.session_state.get("auth_name", ""), placeholder="e.g. Bharath")
         c1, c2 = st.columns(2)
         role = c1.text_input("🎯 Target role", "Software Engineer")
         level = c2.selectbox("📊 Experience level", ["Entry level", "Mid level", "Senior", "Staff / Lead"])
@@ -111,13 +251,16 @@ def setup_view():
                 else model_choice
             )
             st.caption("Install a model with `ollama pull <model-name>` before using it.")
-        submitted = st.form_submit_button("🚀 Start my interview", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("🚀 Start my interview", type="primary", use_container_width=True, disabled=not camera_ready)
     if submitted:
+        if not camera_ready:
+            st.error("Complete the camera pre-check before starting the interview.")
+            return
         if not name.strip() or not role.strip():
             st.error("Please provide your name and target role.")
             return
         with st.spinner("Preparing your interview..."):
-            user_id = database.get_or_create_user(name)
+            user_id = st.session_state.get("auth_user_id") or database.get_or_create_user(name)
             session_id = database.create_session(user_id, role, level, interview_type, count, topics)
             questions = ai_service.generate_questions(
                 role, level, interview_type, count, model, topics, database.prior_questions(user_id),
@@ -314,13 +457,21 @@ def report_view():
 
 
 def dashboard():
+    if "auth_user_id" not in st.session_state:
+        return
     st.sidebar.title("Interview Coach")
+    st.sidebar.caption(f"Signed in as **{st.session_state.get('auth_name', 'candidate')}**")
+    if st.sidebar.button("Sign out", use_container_width=True):
+        reset()
+        st.session_state.pop("auth_user_id", None)
+        st.session_state.pop("auth_name", None)
+        st.rerun()
     if st.sidebar.button("＋ New interview", use_container_width=True):
         reset()
         st.rerun()
     st.sidebar.divider()
     st.sidebar.subheader("Recent progress")
-    rows = database.history()
+    rows = database.history(user_id=st.session_state.auth_user_id)
     if not rows:
         st.sidebar.caption("Complete your first interview to see progress here.")
     for row in rows:
@@ -328,10 +479,13 @@ def dashboard():
         st.sidebar.caption(row["created_at"][:10])
 
 
-dashboard()
-if "session_id" not in st.session_state:
-    setup_view()
-elif st.session_state.current < len(st.session_state.questions):
-    interview_view()
+if "auth_user_id" not in st.session_state:
+    login_view()
 else:
-    report_view()
+    dashboard()
+    if "session_id" not in st.session_state:
+        setup_view()
+    elif st.session_state.current < len(st.session_state.questions):
+        interview_view()
+    else:
+        report_view()
