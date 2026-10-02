@@ -7,6 +7,8 @@ committed immediately so a browser refresh does not lose completed answers.
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +35,8 @@ def init_db(path: Path | str = DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                password_hash TEXT,
+                email TEXT UNIQUE,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS interview_sessions (
@@ -78,6 +82,10 @@ def init_db(path: Path | str = DB_PATH) -> None:
         user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
         if "created_at" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+        if "password_hash" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "email" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN email TEXT")
         # Migrate starter databases without breaking existing data.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(interview_sessions)")}
         for name, definition in (
@@ -107,6 +115,47 @@ def get_or_create_user(name: str, path: Path | str = DB_PATH) -> int:
             return int(existing["user_id"])
         cursor = db.execute("INSERT INTO users(name, created_at) VALUES (?, ?)", (normalized_name, _now()))
         return int(cursor.lastrowid)
+
+
+def _password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
+    return f"{salt.hex()}${digest.hex()}"
+
+
+def create_login_user(name: str, email: str, password: str, path: Path | str = DB_PATH) -> tuple[int | None, str | None]:
+    normalized_name = name.strip()
+    normalized_email = email.strip().lower()
+    if not normalized_name or "@" not in normalized_email or len(password) < 6:
+        return None, "Enter a valid email address and a password with at least 6 characters."
+    with connect(path) as db:
+        existing = db.execute("SELECT user_id FROM users WHERE name = ?", (normalized_name,)).fetchone()
+        if existing:
+            return None, "That username already exists. Please sign in instead."
+        existing = db.execute("SELECT user_id FROM users WHERE email = ?", (normalized_email,)).fetchone()
+        if existing:
+            return None, "That email is already registered. Please sign in instead."
+        cursor = db.execute(
+            "INSERT INTO users(name, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+            (normalized_name, normalized_email, _password_hash(password), _now()),
+        )
+        return int(cursor.lastrowid), None
+
+
+def authenticate_user(name: str, password: str, path: Path | str = DB_PATH) -> int | None:
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT user_id, password_hash FROM users WHERE name = ?",
+            (name.strip(),),
+        ).fetchone()
+    if not row or not row["password_hash"]:
+        return None
+    try:
+        salt_hex, digest_hex = row["password_hash"].split("$", 1)
+        candidate = _password_hash(password, bytes.fromhex(salt_hex)).split("$", 1)[1]
+    except (ValueError, TypeError):
+        return None
+    return int(row["user_id"]) if secrets.compare_digest(candidate, digest_hex) else None
 
 
 def create_session(user_id: int, job_role: str, skill_level: str, interview_type: str,
@@ -189,8 +238,16 @@ def finish_session(session_id: int, report: dict[str, Any], path: Path | str = D
         )
 
 
-def history(limit: int = 10, path: Path | str = DB_PATH) -> list[sqlite3.Row]:
+def history(limit: int = 10, user_id: int | None = None, path: Path | str = DB_PATH) -> list[sqlite3.Row]:
+    if isinstance(user_id, (str, Path)) and path == DB_PATH:
+        path, user_id = user_id, None
     with connect(path) as db:
+        if user_id is not None:
+            return db.execute(
+                """SELECT s.*, u.name FROM interview_sessions s JOIN users u ON u.user_id=s.user_id
+                WHERE s.status='completed' AND s.user_id=? ORDER BY s.created_at DESC LIMIT ?""",
+                (user_id, limit),
+            ).fetchall()
         return db.execute(
             """SELECT s.*, u.name FROM interview_sessions s JOIN users u ON u.user_id=s.user_id
             WHERE s.status='completed' ORDER BY s.created_at DESC LIMIT ?""", (limit,)
