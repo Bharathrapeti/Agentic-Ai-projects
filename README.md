@@ -15,6 +15,42 @@ streamlit run app.py
 
 Open the displayed local URL. The SQLite file `interview_coach.db` is created automatically.
 
+## Sign in and camera pre-check
+
+The app opens with a local sign-in page. Create an account once, verify the
+email OTP, then sign in to keep your interview history and progress associated
+with your profile. Passwords are stored as salted PBKDF2 hashes in the local
+SQLite database.
+
+Email OTP delivery requires SMTP configuration before account registration:
+
+```powershell
+$env:SMTP_HOST="smtp.gmail.com"
+$env:SMTP_PORT="587"
+$env:SMTP_USERNAME="your-gmail-address@gmail.com"
+$env:SMTP_PASSWORD="your-16-character-gmail-app-password"
+$env:SMTP_FROM="your-gmail-address@gmail.com"
+streamlit run app.py
+```
+
+For Gmail, enable 2-Step Verification and create an **App Password** at
+`myaccount.google.com/apppasswords`; do not use your normal Gmail password.
+The variables must be set in the same terminal from which Streamlit is
+started. Alternatively, create `.streamlit/secrets.toml` (do not commit it):
+
+```toml
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = "587"
+SMTP_USERNAME = "your-gmail-address@gmail.com"
+SMTP_PASSWORD = "your-16-character-gmail-app-password"
+SMTP_FROM = "your-gmail-address@gmail.com"
+```
+
+Camera access is mandatory before an interview can start. On the setup page,
+click **START** in the camera pre-check, allow browser camera permission,
+check your framing and lighting, and confirm the pre-check. The **Start my
+interview** button remains disabled until this is complete.
+
 ## Optional AI
 
 Install [Ollama](https://ollama.com), start it, and pull a model:
