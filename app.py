@@ -88,21 +88,37 @@ def login_view():
                     st.error("Enter a username and a valid email address.")
                 else:
                     otp = f"{secrets.randbelow(1_000_000):06d}"
+                    email_sent = True
                     try:
                         _send_otp_email(email.strip(), otp)
                     except (OSError, smtplib.SMTPException) as error:
-                        st.error(f"Could not send the verification email: {error}")
-                    else:
-                        st.session_state.pending_registration = {
-                            "username": username.strip(),
-                            "email": email.strip().lower(),
-                            "password": password,
-                            "otp": otp,
-                            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-                        }
-                        st.rerun()
+                        if "Email is not configured." not in str(error):
+                            st.error(f"Could not send the verification email: {error}")
+                            email_sent = False
+                        else:
+                            email_sent = False
+                            st.session_state.local_otp = otp
+                            st.warning(
+                                "SMTP is not configured. Development OTP mode is active; "
+                                "use the code shown below. Configure SMTP before deploying this app."
+                            )
+                    if email_sent:
+                        st.session_state.local_otp = None
+                    st.session_state.pending_registration = {
+                        "username": username.strip(),
+                        "email": email.strip().lower(),
+                        "password": password,
+                        "otp": otp,
+                        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+                    }
+                    st.rerun()
         else:
             st.info(f"We sent a 6-digit verification code to {pending['email']}.")
+            if st.session_state.get("local_otp"):
+                st.warning(
+                    f"Development OTP: **{st.session_state.local_otp}** "
+                    "(visible only because SMTP email is not configured)"
+                )
             with st.form("verify_registration"):
                 otp = st.text_input("Verification OTP", max_chars=6)
                 verified = st.form_submit_button("Verify and create account", type="primary", use_container_width=True)
@@ -120,6 +136,7 @@ def login_view():
                         st.error(error)
                     else:
                         st.session_state.pop("pending_registration", None)
+                        st.session_state.pop("local_otp", None)
                         st.session_state.auth_user_id = user_id
                         st.session_state.auth_name = pending["username"]
                         st.rerun()
