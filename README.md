@@ -36,7 +36,9 @@ streamlit run app.py
 For Gmail, enable 2-Step Verification and create an **App Password** at
 `myaccount.google.com/apppasswords`; do not use your normal Gmail password.
 The variables must be set in the same terminal from which Streamlit is
-started. Alternatively, create `.streamlit/secrets.toml` (do not commit it):
+started. Alternatively, copy `.streamlit/secrets.example.toml` to
+`.streamlit/secrets.toml` (do not commit the latter) and replace the
+placeholders:
 
 ```toml
 SMTP_HOST = "smtp.gmail.com"
@@ -45,6 +47,15 @@ SMTP_USERNAME = "your-gmail-address@gmail.com"
 SMTP_PASSWORD = "your-16-character-gmail-app-password"
 SMTP_FROM = "your-gmail-address@gmail.com"
 ```
+
+For Gmail, use the 16-character Google App Password without spaces in
+`SMTP_PASSWORD`. Restart Streamlit after changing the secrets file. The
+application reads environment variables first and uses Streamlit secrets as
+the local-development fallback; it never displays these values in the UI.
+
+The OTP is never displayed in the app. It is delivered privately to the
+entered email address, which you can open on your phone. Registration remains
+blocked until SMTP is configured and the email is sent successfully.
 
 Camera access is mandatory before an interview can start. On the setup page,
 click **START** in the camera pre-check, allow browser camera permission,
