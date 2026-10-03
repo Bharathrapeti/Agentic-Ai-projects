@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import smtplib
 import streamlit as st
-from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
+
+import auth_helpers
 
 import ai_service
 import capture
@@ -40,7 +40,7 @@ st.markdown("""<style>
 
 
 def reset():
-    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay"):
+    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay", "password_reset"):
         st.session_state.pop(key, None)
 
 
@@ -61,7 +61,7 @@ def login_view():
     login_tab, register_tab = st.tabs(["Sign in", "Create account"])
     with login_tab:
         with st.form("login"):
-            username = st.text_input("Username", key="login_username")
+            username = st.text_input("Email or username", key="login_username")
             password = st.text_input("Password", type="password", key="login_password")
             submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
         if submitted:
@@ -72,6 +72,9 @@ def login_view():
                 st.session_state.auth_user_id = user_id
                 st.session_state.auth_name = username.strip()
                 st.rerun()
+        if st.button("Forgot password?", key="forgot_password"):
+            st.session_state.password_reset = {"stage": "request"}
+            st.rerun()
     with register_tab:
         pending = st.session_state.get("pending_registration")
         if not pending:
@@ -87,38 +90,23 @@ def login_view():
                 elif not username.strip() or "@" not in email:
                     st.error("Enter a username and a valid email address.")
                 else:
-                    otp = f"{secrets.randbelow(1_000_000):06d}"
-                    email_sent = True
+                    otp = auth_helpers.create_otp()
                     try:
                         _send_otp_email(email.strip(), otp)
                     except (OSError, smtplib.SMTPException) as error:
-                        if "Email is not configured." not in str(error):
-                            st.error(f"Could not send the verification email: {error}")
-                            email_sent = False
-                        else:
-                            email_sent = False
-                            st.session_state.local_otp = otp
-                            st.warning(
-                                "SMTP is not configured. Development OTP mode is active; "
-                                "use the code shown below. Configure SMTP before deploying this app."
-                            )
-                    if email_sent:
-                        st.session_state.local_otp = None
+                        st.error(f"Could not send the verification email: {error}")
+                        st.info("Configure SMTP email delivery, then try registration again.")
+                        return
                     st.session_state.pending_registration = {
                         "username": username.strip(),
                         "email": email.strip().lower(),
                         "password": password,
-                        "otp": otp,
+                        "otp_hash": auth_helpers.hash_otp(otp),
                         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
                     }
                     st.rerun()
         else:
             st.info(f"We sent a 6-digit verification code to {pending['email']}.")
-            if st.session_state.get("local_otp"):
-                st.warning(
-                    f"Development OTP: **{st.session_state.local_otp}** "
-                    "(visible only because SMTP email is not configured)"
-                )
             with st.form("verify_registration"):
                 otp = st.text_input("Verification OTP", max_chars=6)
                 verified = st.form_submit_button("Verify and create account", type="primary", use_container_width=True)
@@ -126,7 +114,7 @@ def login_view():
                 expired = datetime.now(timezone.utc) >= datetime.fromisoformat(pending["expires_at"])
                 if expired:
                     st.error("This OTP has expired. Start registration again.")
-                elif not secrets.compare_digest(otp.strip(), pending["otp"]):
+                elif not secrets.compare_digest(auth_helpers.hash_otp(otp), pending["otp_hash"]):
                     st.error("Incorrect OTP.")
                 else:
                     user_id, error = database.create_login_user(
@@ -136,7 +124,6 @@ def login_view():
                         st.error(error)
                     else:
                         st.session_state.pop("pending_registration", None)
-                        st.session_state.pop("local_otp", None)
                         st.session_state.auth_user_id = user_id
                         st.session_state.auth_name = pending["username"]
                         st.rerun()
@@ -144,41 +131,117 @@ def login_view():
                 st.session_state.pop("pending_registration", None)
                 st.rerun()
 
+    if st.session_state.get("password_reset"):
+        password_reset_view()
+
+
+def password_reset_view():
+    reset_state = st.session_state.password_reset
+    st.divider()
+    st.subheader("Reset your password")
+    if reset_state["stage"] == "request":
+        with st.form("password_reset_request"):
+            identifier = st.text_input("Registered email or username")
+            requested = st.form_submit_button("Send reset OTP", type="primary")
+        if requested:
+            user = database.find_user_for_password_reset(identifier)
+            if not user or not user["email"]:
+                st.info("If an account matches those details, a password reset code has been sent.")
+            else:
+                otp = auth_helpers.create_otp()
+                try:
+                    _send_password_reset_email(user["email"], user["name"], otp)
+                except (OSError, smtplib.SMTPException) as error:
+                    st.error(f"Could not send the password reset email: {error}")
+                else:
+                    st.session_state.password_reset = {
+                        "stage": "verify",
+                        "user_id": int(user["user_id"]),
+                        "email": user["email"],
+                        "username": user["name"],
+                        "otp_hash": auth_helpers.hash_otp(otp),
+                        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                        "send_count": 1,
+                    }
+                    st.rerun()
+        if st.button("Back to sign in", key="reset_back_request"):
+            st.session_state.pop("password_reset", None)
+            st.rerun()
+    elif reset_state["stage"] == "verify":
+        st.info(f"Enter the 6-digit code sent to {reset_state['email']}. It expires in 5 minutes.")
+        with st.form("password_reset_verify"):
+            otp = st.text_input("Verification OTP", max_chars=6)
+            verified = st.form_submit_button("Verify OTP", type="primary")
+        if verified:
+            if datetime.now(timezone.utc) >= datetime.fromisoformat(reset_state["expires_at"]):
+                st.error("This OTP has expired. Request a new code.")
+            elif not secrets.compare_digest(auth_helpers.hash_otp(otp), reset_state["otp_hash"]):
+                st.error("Incorrect OTP.")
+            else:
+                reset_state["stage"] = "new_password"
+                st.rerun()
+        if reset_state["send_count"] < 3 and st.button("Resend OTP", key="reset_resend"):
+            otp = auth_helpers.create_otp()
+            try:
+                _send_password_reset_email(reset_state["email"], reset_state["username"], otp)
+            except (OSError, smtplib.SMTPException) as error:
+                st.error(f"Could not resend the password reset email: {error}")
+            else:
+                reset_state.update(
+                    otp_hash=auth_helpers.hash_otp(otp),
+                    expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                    send_count=reset_state["send_count"] + 1,
+                )
+                st.success("A new reset code has been sent.")
+                st.rerun()
+        elif reset_state["send_count"] >= 3:
+            st.caption("Maximum resend attempts reached. Start again later.")
+        if st.button("Cancel password reset", key="reset_cancel_verify"):
+            st.session_state.pop("password_reset", None)
+            st.rerun()
+    else:
+        with st.form("new_password"):
+            new_password = st.text_input("New password", type="password")
+            confirm_password = st.text_input("Confirm new password", type="password")
+            changed = st.form_submit_button("Change password", type="primary")
+        if changed:
+            if len(new_password) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif new_password != confirm_password:
+                st.error("The passwords do not match.")
+            else:
+                database.update_user_password(reset_state["user_id"], new_password)
+                st.session_state.pop("password_reset", None)
+                st.success("Password changed successfully. You can now sign in.")
+        if st.button("Cancel password reset", key="reset_cancel_password"):
+            st.session_state.pop("password_reset", None)
+            st.rerun()
+
 
 def _send_otp_email(recipient: str, otp: str) -> None:
-    def setting(name: str, default: str = "") -> str:
-        value = os.getenv(name)
-        if value:
-            return value
-        try:
-            return str(st.secrets.get(name, default))
-        except (FileNotFoundError, KeyError):
-            return default
+    secrets_values = _streamlit_smtp_secrets()
+    smtp = auth_helpers.smtp_config(secrets_values)
+    auth_helpers.send_otp(
+        recipient=recipient,
+        code=otp,
+        smtp=smtp,
+    )
 
-    host = setting("SMTP_HOST")
-    port = int(setting("SMTP_PORT", "587"))
-    username = setting("SMTP_USERNAME")
-    password = setting("SMTP_PASSWORD")
-    sender = setting("SMTP_FROM", username)
-    if not host or not username or not password or not sender:
-        raise OSError(
-            "Email is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, "
-            "SMTP_PASSWORD, and SMTP_FROM, then restart Streamlit."
-        )
-    message = EmailMessage()
-    message["Subject"] = "Interview Coach verification code"
-    message["From"] = sender
-    message["To"] = recipient
-    message.set_content(f"Your Interview Coach verification code is {otp}. It expires in 10 minutes.")
-    if port == 465:
-        server_context = smtplib.SMTP_SSL(host, port, timeout=15)
-    else:
-        server_context = smtplib.SMTP(host, port, timeout=15)
-    with server_context as server:
-        if port != 465:
-            server.starttls()
-        server.login(username, password)
-        server.send_message(message)
+
+def _send_password_reset_email(recipient: str, username: str, otp: str) -> None:
+    smtp = auth_helpers.smtp_config(_streamlit_smtp_secrets())
+    auth_helpers.send_password_reset_otp(
+        recipient=recipient, username=username, code=otp, smtp=smtp
+    )
+
+
+def _streamlit_smtp_secrets() -> dict[str, object]:
+    """Read each root-level SMTP secret explicitly without exposing values."""
+    names = ("SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM")
+    try:
+        return {name: st.secrets[name] for name in names}
+    except (FileNotFoundError, KeyError):
+        return {}
 
 
 def setup_view():
@@ -216,7 +279,7 @@ def setup_view():
         st.success("Camera pre-check passed. You can start the interview.")
     st.markdown('<div class="section-card"><h3>Build your practice session</h3><p class="muted">Tell the coach what you want to practise. You can change these settings for every attempt.</p></div>', unsafe_allow_html=True)
     with st.form("setup"):
-        name = st.text_input("👋 What should the interviewer call you?", value=st.session_state.get("auth_name", ""), placeholder="e.g. Bharath")
+        name = st.text_input("👋 What should the interviewer call you?", value=st.session_state.get("auth_name", ""), placeholder="Enter your name")
         c1, c2 = st.columns(2)
         role = c1.text_input("🎯 Target role", "Software Engineer")
         level = c2.selectbox("📊 Experience level", ["Entry level", "Mid level", "Senior", "Staff / Lead"])
