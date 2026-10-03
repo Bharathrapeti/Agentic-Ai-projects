@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 venv/
 interview_coach.db
+.streamlit/secrets.toml
