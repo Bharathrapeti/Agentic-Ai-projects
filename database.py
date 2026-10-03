@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from auth_helpers import hash_password, verify_password
+
 DB_PATH = Path(__file__).with_name("interview_coach.db")
 
 
@@ -137,7 +139,7 @@ def create_login_user(name: str, email: str, password: str, path: Path | str = D
             return None, "That email is already registered. Please sign in instead."
         cursor = db.execute(
             "INSERT INTO users(name, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
-            (normalized_name, normalized_email, _password_hash(password), _now()),
+            (normalized_name, normalized_email, hash_password(password), _now()),
         )
         return int(cursor.lastrowid), None
 
@@ -145,17 +147,40 @@ def create_login_user(name: str, email: str, password: str, path: Path | str = D
 def authenticate_user(name: str, password: str, path: Path | str = DB_PATH) -> int | None:
     with connect(path) as db:
         row = db.execute(
-            "SELECT user_id, password_hash FROM users WHERE name = ?",
-            (name.strip(),),
+            """SELECT user_id, password_hash FROM users
+            WHERE lower(name) = ? OR lower(email) = ?""",
+            (name.strip().lower(), name.strip().lower()),
         ).fetchone()
     if not row or not row["password_hash"]:
         return None
+    if verify_password(password, row["password_hash"]):
+        return int(row["user_id"])
+    # Keep accounts created by earlier app versions sign-in compatible.
     try:
         salt_hex, digest_hex = row["password_hash"].split("$", 1)
         candidate = _password_hash(password, bytes.fromhex(salt_hex)).split("$", 1)[1]
     except (ValueError, TypeError):
         return None
     return int(row["user_id"]) if secrets.compare_digest(candidate, digest_hex) else None
+
+
+def find_user_for_password_reset(identifier: str, path: Path | str = DB_PATH) -> sqlite3.Row | None:
+    normalized = identifier.strip().lower()
+    with connect(path) as db:
+        return db.execute(
+            """SELECT user_id, name, email FROM users
+            WHERE lower(name) = ? OR lower(email) = ?
+            LIMIT 1""",
+            (normalized, normalized),
+        ).fetchone()
+
+
+def update_user_password(user_id: int, password: str, path: Path | str = DB_PATH) -> None:
+    with connect(path) as db:
+        db.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (hash_password(password), user_id),
+        )
 
 
 def create_session(user_id: int, job_role: str, skill_level: str, interview_type: str,
