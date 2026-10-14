@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import secrets
 import smtplib
+import logging
+import inspect
+import html
 import streamlit as st
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +16,8 @@ import ai_service
 import capture
 import database
 from live_interview import live_interview
+
+logger = logging.getLogger(__name__)
 
 try:
     from streamlit_webrtc import webrtc_streamer  # noqa: F401
@@ -36,11 +41,19 @@ st.markdown("""<style>
 .feature-card span {color:#64748b; font-size:.9rem;}
 .section-card {padding:1.2rem 1.35rem; border-radius:18px; background:#f8fafc; border:1px solid #e2e8f0; margin:1rem 0;}
 .muted {color:#64748b; font-size:.9rem;}
+.live-shell {padding:1rem 1.1rem; border:1px solid #263449; border-radius:20px; background:linear-gradient(145deg,#0f172a,#111827); margin:.8rem 0 1.1rem;}
+.live-kicker {color:#94a3b8; font-size:.78rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; margin-bottom:.45rem;}
+.live-question-card {padding:1.15rem 1.25rem; border:1px solid #334155; border-left:4px solid #6366f1; border-radius:14px; background:#172033; color:#f8fafc; font-size:1.18rem; line-height:1.55; overflow-wrap:anywhere; box-shadow:0 8px 22px rgba(2,6,23,.18);}
+.live-status {display:inline-flex; align-items:center; gap:.45rem; padding:.35rem .65rem; border:1px solid #334155; border-radius:999px; color:#cbd5e1; background:#111827; font-size:.78rem; font-weight:600;}
+.live-status-dot {width:.45rem; height:.45rem; border-radius:50%; background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.14);}
+.live-history-card {padding:.8rem 1rem; border:1px solid #263449; border-radius:12px; background:#111827; margin:.65rem 0;}
+.live-history-card .stMarkdown {margin-bottom:0;}
+@media (max-width: 800px) {.block-container {padding-left:1rem; padding-right:1rem;} .live-question-card {font-size:1.05rem;}}
 </style>""", unsafe_allow_html=True)
 
 
 def reset():
-    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay", "password_reset"):
+    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay", "password_reset", "setup_details", "setup_submitted", "camera_confirmed", "voice_test_passed", "voice_test_text", "voice_test_error"):
         st.session_state.pop(key, None)
 
 
@@ -146,12 +159,25 @@ def password_reset_view():
         if requested:
             user = database.find_user_for_password_reset(identifier)
             if not user or not user["email"]:
+                logger.info(
+                    "Password reset not sent: account not eligible or not found "
+                    "(identifier_type=%s, user_found=%s, email_present=%s)",
+                    "email" if "@" in identifier else "username",
+                    bool(user),
+                    bool(user and user["email"]),
+                )
                 st.info("If an account matches those details, a password reset code has been sent.")
             else:
                 otp = auth_helpers.create_otp()
                 try:
                     _send_password_reset_email(user["email"], user["name"], otp)
                 except (OSError, smtplib.SMTPException) as error:
+                    logger.exception(
+                        "Password reset email failed for an eligible account "
+                        "(user_id=%s, recipient_domain=%s)",
+                        user["user_id"],
+                        user["email"].split("@", 1)[1] if "@" in user["email"] else "unknown",
+                    )
                     st.error(f"Could not send the password reset email: {error}")
                 else:
                     st.session_state.password_reset = {
@@ -185,6 +211,11 @@ def password_reset_view():
             try:
                 _send_password_reset_email(reset_state["email"], reset_state["username"], otp)
             except (OSError, smtplib.SMTPException) as error:
+                logger.exception(
+                    "Password reset resend failed (user_id=%s, send_count=%s)",
+                    reset_state["user_id"],
+                    reset_state["send_count"],
+                )
                 st.error(f"Could not resend the password reset email: {error}")
             else:
                 reset_state.update(
@@ -254,29 +285,6 @@ def setup_view():
     f1.markdown('<div class="feature-card"><strong>🎙️ Real conversation</strong><span>Speak naturally with hands-free voice mode and live camera practice.</span></div>', unsafe_allow_html=True)
     f2.markdown('<div class="feature-card"><strong>🧠 Personal coaching</strong><span>Get targeted feedback, follow-up questions, and practical next steps.</span></div>', unsafe_allow_html=True)
     f3.markdown('<div class="feature-card"><strong>📈 Track your growth</strong><span>Save your attempts and see how your interview performance improves.</span></div>', unsafe_allow_html=True)
-    st.subheader("📹 Camera pre-check")
-    st.caption("Camera access is required for every interview. Start the preview, check your framing and lighting, then confirm before continuing.")
-    camera_ready = False
-    if WEBRTC_AVAILABLE:
-        camera_context = capture.live_stream("camera_precheck", audio=False)
-        camera_ready = bool(camera_context and camera_context.state.playing)
-        if camera_ready:
-            st.success("Camera is active and ready.")
-        else:
-            st.warning("Click START on the camera preview and allow browser camera permission.")
-    else:
-        camera_photo = st.camera_input("Take a camera check photo", key="camera_precheck_photo")
-        camera_ready = camera_photo is not None
-        if not camera_ready:
-            st.warning("Take a camera check photo before starting the interview.")
-    camera_confirmed = st.checkbox(
-        "I have checked my camera framing, lighting, and eye contact.",
-        disabled=not camera_ready,
-        key="camera_confirmed",
-    )
-    camera_ready = camera_ready and camera_confirmed
-    if camera_ready:
-        st.success("Camera pre-check passed. You can start the interview.")
     st.markdown('<div class="section-card"><h3>Build your practice session</h3><p class="muted">Tell the coach what you want to practise. You can change these settings for every attempt.</p></div>', unsafe_allow_html=True)
     with st.form("setup"):
         name = st.text_input("👋 What should the interviewer call you?", value=st.session_state.get("auth_name", ""), placeholder="Enter your name")
@@ -331,28 +339,144 @@ def setup_view():
                 else model_choice
             )
             st.caption("Install a model with `ollama pull <model-name>` before using it.")
-        submitted = st.form_submit_button("🚀 Start my interview", type="primary", use_container_width=True, disabled=not camera_ready)
+        submitted = st.form_submit_button("Submit Details", type="primary", use_container_width=True)
     if submitted:
-        if not camera_ready:
-            st.error("Complete the camera pre-check before starting the interview.")
-            return
         if not name.strip() or not role.strip():
             st.error("Please provide your name and target role.")
             return
+        st.session_state.setup_details = {
+            "name": name.strip(),
+            "role": role.strip(),
+            "level": level,
+            "interview_type": interview_type,
+            "count": count,
+            "topics": topics,
+            "adaptive_mode": adaptive_mode,
+            "live_mode": live_mode,
+            "language": language,
+            "model": model,
+        }
+        st.session_state.setup_submitted = True
+        st.session_state.camera_confirmed = False
+        st.session_state.voice_test_passed = False
+        st.session_state.pop("voice_test_text", None)
+        st.session_state.pop("voice_test_error", None)
+        st.rerun()
+
+
+def camera_precheck_view():
+    details = st.session_state.setup_details
+    st.markdown(
+        '<div class="hero"><h1>📹 Camera & Voice Pre-check</h1>'
+        '<p>Camera and microphone access are required before your interview can begin. Test both, then confirm you are ready.</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("📹 Camera preview")
+    st.caption("Click START, allow browser camera permission, and use SELECT DEVICE in the camera control when multiple cameras are available.")
+    camera_ready = False
+    if hasattr(capture, "camera_precheck"):
+        camera_event = capture.camera_precheck()
+        camera_ready = camera_event.get("status") == "active"
+        if camera_ready:
+            st.success("Camera is active and ready.")
+        elif camera_event.get("status") == "error":
+            st.error(camera_event.get("error", "Camera could not be started."))
+        else:
+            st.info("Click START on the camera preview and allow browser camera permission.")
+    else:
+        camera_photo = st.camera_input("Camera preview", key="camera_precheck_photo")
+        camera_ready = camera_photo is not None
+        if not camera_ready:
+            st.warning("No live camera component is available. Allow camera access and take a preview photo.")
+    st.session_state.camera_confirmed = st.checkbox(
+        "I have checked my camera framing, lighting, and eye contact.",
+        disabled=not camera_ready,
+        value=st.session_state.get("camera_confirmed", False),
+        key="camera_check_confirmation",
+    )
+    st.subheader("🎙️ Voice pre-check")
+    st.caption("Click START VOICE TEST, speak a short sentence, and stop recording. Your speech must be recognized before you can start.")
+    voice_available, voice_message = capture.available()
+    voice_recording = None
+    if voice_available:
+        voice_recording = capture.audio_input(
+            "precheck_voice",
+            start_prompt="START VOICE TEST",
+            stop_prompt="STOP VOICE TEST",
+        )
+        if voice_recording and voice_recording.get("bytes"):
+            st.caption(
+                f"Recorded format: {voice_recording.get('format', 'unknown')} "
+                f"({len(voice_recording['bytes'])} bytes)"
+            )
+            language_code = {
+                "English (India)": "en-IN",
+                "English (US)": "en-US",
+                "English (UK)": "en-GB",
+            }.get(details["language"], "en-IN")
+            with st.spinner("Recognizing your voice..."):
+                transcript, error = capture.transcribe_audio(
+                    voice_recording["bytes"], language_code
+                )
+            if transcript:
+                st.session_state.voice_test_passed = True
+                st.session_state.voice_test_text = transcript
+                st.session_state.pop("voice_test_error", None)
+            else:
+                st.session_state.voice_test_passed = False
+                st.session_state.voice_test_error = error or "Speech was not recognized."
+        if st.session_state.get("voice_test_passed"):
+            st.success("Voice test passed.")
+            st.info(f"Recognized speech: {st.session_state.voice_test_text}")
+        elif st.session_state.get("voice_test_error"):
+            st.error(st.session_state.voice_test_error)
+            st.caption("Try the voice test again and speak clearly for a few seconds.")
+    else:
+        st.warning(f"Voice test unavailable: {voice_message}")
+    can_start = (
+        camera_ready
+        and st.session_state.camera_confirmed
+        and st.session_state.get("voice_test_passed", False)
+    )
+    if can_start:
+        st.success("Camera and voice pre-checks passed. You can start the interview.")
+    if st.button("🚀 Start your interview", type="primary", use_container_width=True, disabled=not can_start):
         with st.spinner("Preparing your interview..."):
-            user_id = st.session_state.get("auth_user_id") or database.get_or_create_user(name)
-            session_id = database.create_session(user_id, role, level, interview_type, count, topics)
+            user_id = st.session_state.get("auth_user_id") or database.get_or_create_user(details["name"])
+            session_id = database.create_session(
+                user_id, details["role"], details["level"], details["interview_type"],
+                details["count"], details["topics"],
+            )
             questions = ai_service.generate_questions(
-                role, level, interview_type, count, model, topics, database.prior_questions(user_id),
-                use_ai=not live_mode,
+                details["role"], details["level"], details["interview_type"], details["count"],
+                details["model"], details["topics"], database.prior_questions(user_id),
+                use_ai=not details["live_mode"],
             )
             if questions:
-                questions[0] = opening_question(name, role)
+                questions[0] = opening_question(details["name"], details["role"])
             database.save_questions(session_id, questions)
-        st.session_state.update(session_id=session_id, questions=questions, current=0, evaluations=[],
-                                model=model, role=role, name=name, topics=topics, initial_count=count,
-                                adaptive_mode=adaptive_mode, live_mode=live_mode, language=language, live_transcript=[],
-                                live_last_event=None, live_replay=0, welcome_played=False)
+        st.session_state.update(
+            session_id=session_id, questions=questions, current=0, evaluations=[],
+            model=details["model"], role=details["role"], name=details["name"],
+            topics=details["topics"], initial_count=details["count"],
+            adaptive_mode=details["adaptive_mode"], live_mode=details["live_mode"],
+            language=details["language"], live_transcript=[], live_last_event=None,
+            live_replay=0, welcome_played=False,
+        )
+        st.session_state.pop("setup_details", None)
+        st.session_state.pop("setup_submitted", None)
+        st.session_state.pop("camera_confirmed", None)
+        st.session_state.pop("voice_test_passed", None)
+        st.session_state.pop("voice_test_text", None)
+        st.session_state.pop("voice_test_error", None)
+        st.rerun()
+    if st.button("← Edit interview details", key="edit_setup"):
+        st.session_state.pop("setup_details", None)
+        st.session_state.pop("setup_submitted", None)
+        st.session_state.pop("camera_confirmed", None)
+        st.session_state.pop("voice_test_passed", None)
+        st.session_state.pop("voice_test_text", None)
+        st.session_state.pop("voice_test_error", None)
         st.rerun()
 
 
@@ -385,28 +509,48 @@ def interview_view():
     question = questions[index]
     st.markdown(f"### {question}")
     if st.session_state.get("live_mode"):
-        st.info("🎙️ **Live interview is on.** Your browser will speak, listen for a pause, and continue without button clicks.")
-        st.caption("Supported in Chrome/Edge desktop. Keep your speaker volume moderate and use headphones when possible to prevent the question audio from entering your answer.")
-        if WEBRTC_AVAILABLE:
-            st.subheader("📹 Your live camera and microphone")
-            st.caption("The preview uses video only. The separate recorder uses your microphone once, preventing echo and duplicate words.")
-            capture.live_stream("live_camera_preview", audio=False)
-        else:
-            st.warning("Live camera/microphone preview is unavailable. Install `streamlit-webrtc` to enable it.")
-        event = live_interview(
-            question,
-            greeting=f"Hi {st.session_state.name}, welcome to your interview." if index == 0 else "",
-            replay=st.session_state.get("live_replay", 0),
-            key="live_interview",
+        st.markdown(
+            '<div class="live-shell"><div class="live-kicker">Hands-free interview</div>'
+            '<span class="live-status"><span class="live-status-dot"></span>Live conversation enabled</span></div>',
+            unsafe_allow_html=True,
         )
-        st.markdown("#### 🎙️ Interviewer is asking")
-        st.info(question)
-        for item in st.session_state.get("live_transcript", []):
-            with st.chat_message("assistant"):
-                st.write(item["question"])
-            with st.chat_message("user"):
-                st.write(item["answer"])
-            st.caption(f"Coach score: {item['evaluation']['score']}/10 — {item['evaluation']['feedback']}")
+        main_col, camera_col = st.columns([1.55, 1], gap="large")
+        with main_col:
+            st.markdown("#### 🎙️ Interviewer is asking")
+            st.markdown(
+                f'<div class="live-question-card">{html.escape(question)}</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Your turn — speak your answer when the interviewer finishes.")
+            if st.session_state.get("live_transcript"):
+                st.markdown("#### Conversation history")
+                for item in st.session_state.get("live_transcript", []):
+                    st.markdown(
+                        f'<div class="live-history-card"><strong style="color:#a5b4fc;">Interviewer</strong>'
+                        f'<div style="margin:.35rem 0 .7rem;color:#e2e8f0;">{html.escape(item["question"])}</div>'
+                        f'<strong style="color:#86efac;">You</strong>'
+                        f'<div style="margin:.35rem 0;color:#cbd5e1;">{html.escape(item["answer"])}</div>'
+                        f'<small style="color:#94a3b8;">Coach score: {item["evaluation"]["score"]}/10 · '
+                        f'{html.escape(item["evaluation"]["feedback"])}</small></div>',
+                        unsafe_allow_html=True,
+                    )
+        with camera_col:
+            st.markdown("#### Camera & microphone")
+            st.caption("Your camera preview is mirrored for a natural self-view.")
+            live_interview_parameters = {
+                "greeting": f"Hi {st.session_state.name}, welcome to your interview." if index == 0 else "",
+                "replay": st.session_state.get("live_replay", 0),
+                "key": "live_interview",
+            }
+            live_language = {
+                "English (India)": "en-IN",
+                "English (US)": "en-US",
+                "English (UK)": "en-GB",
+            }.get(st.session_state.get("language"), "en-IN")
+            if "language" in inspect.signature(live_interview).parameters:
+                live_interview_parameters["language"] = live_language
+            event = live_interview(question, **live_interview_parameters)
+            st.caption("Supported in current Chrome or Edge. Headphones reduce echo.")
         if event and event.get("type") == "answer" and event.get("at") != st.session_state.get("live_last_event"):
             answer = event.get("text", "").strip()
             if not answer and event.get("audio"):
@@ -564,7 +708,10 @@ if "auth_user_id" not in st.session_state:
 else:
     dashboard()
     if "session_id" not in st.session_state:
-        setup_view()
+        if st.session_state.get("setup_submitted") and st.session_state.get("setup_details"):
+            camera_precheck_view()
+        else:
+            setup_view()
     elif st.session_state.current < len(st.session_state.questions):
         interview_view()
     else:
