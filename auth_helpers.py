@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import smtplib
@@ -13,6 +14,7 @@ from typing import Mapping
 
 _PASSWORD_ROUNDS = 240_000
 _OTP_LIFETIME_MINUTES = 10
+logger = logging.getLogger(__name__)
 
 
 def smtp_config(secrets_values: Mapping[str, object] | None = None) -> dict[str, str]:
@@ -88,16 +90,10 @@ def hash_otp(code: str) -> str:
     return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
 
 
-def send_otp(*, recipient: str, code: str, smtp: dict[str, str]) -> None:
-    message = EmailMessage()
-    message["Subject"] = "Your Interview Coach verification code"
+def _send_message(*, recipient: str, message: EmailMessage, smtp: dict[str, str]) -> None:
+    """Send one email through the configured SMTP transport."""
     message["From"] = smtp["from_email"]
     message["To"] = recipient
-    message.set_content(
-        f"Your Interview Coach verification code is {code}.\n\n"
-        f"It expires in {_OTP_LIFETIME_MINUTES} minutes. "
-        "If you did not create this account, ignore this email."
-    )
     port = int(smtp.get("port", "587"))
     if port == 465:
         server_context = smtplib.SMTP_SSL(smtp["host"], port, timeout=20)
@@ -110,13 +106,22 @@ def send_otp(*, recipient: str, code: str, smtp: dict[str, str]) -> None:
         server.send_message(message)
 
 
+def send_otp(*, recipient: str, code: str, smtp: dict[str, str]) -> None:
+    message = EmailMessage()
+    message["Subject"] = "Your Interview Coach verification code"
+    message.set_content(
+        f"Your Interview Coach verification code is {code}.\n\n"
+        f"It expires in {_OTP_LIFETIME_MINUTES} minutes. "
+        "If you did not create this account, ignore this email."
+    )
+    _send_message(recipient=recipient, message=message, smtp=smtp)
+
+
 def send_password_reset_otp(
     *, recipient: str, username: str, code: str, smtp: dict[str, str]
 ) -> None:
     message = EmailMessage()
     message["Subject"] = "AI Interview Coach password reset verification"
-    message["From"] = smtp["from_email"]
-    message["To"] = recipient
     message.set_content(
         "AI Interview Coach\n"
         "Password Reset Verification\n\n"
@@ -127,13 +132,4 @@ def send_password_reset_otp(
         "This OTP will expire in 5 minutes.\n\n"
         "If you did not request this password reset, you can ignore this email."
     )
-    port = int(smtp.get("port", "587"))
-    if port == 465:
-        server_context = smtplib.SMTP_SSL(smtp["host"], port, timeout=20)
-    else:
-        server_context = smtplib.SMTP(smtp["host"], port, timeout=20)
-    with server_context as server:
-        if port != 465:
-            server.starttls()
-        server.login(smtp["username"], smtp["password"])
-        server.send_message(message)
+    _send_message(recipient=recipient, message=message, smtp=smtp)
