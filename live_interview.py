@@ -11,6 +11,15 @@ _component = components.declare_component(
 
 
 def live_interview(question: str, *, active: bool = True, greeting: str = "",
-                   replay: int = 0, key: str = "live") -> dict:
+                   replay: int = 0, language: str = "en-IN",
+                   key: str = "live") -> dict:
     """Speak ``question``, listen until the candidate pauses, and return its transcript."""
-    return _component(question=question, active=active, greeting=greeting, replay=replay, key=key, default={})
+    return _component(
+        question=question,
+        active=active,
+        greeting=greeting,
+        replay=replay,
+        language=language,
+        key=key,
+        default={},
+    )
