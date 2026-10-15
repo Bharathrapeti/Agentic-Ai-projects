@@ -168,7 +168,9 @@ def find_user_for_password_reset(identifier: str, path: Path | str = DB_PATH) ->
     normalized = identifier.strip().lower()
     with connect(path) as db:
         return db.execute(
-            """SELECT user_id, name, email FROM users
+            """SELECT user_id, name,
+            COALESCE(NULLIF(email, ''), CASE WHEN instr(name, '@') > 1 THEN name END) AS email
+            FROM users
             WHERE lower(name) = ? OR lower(email) = ?
             LIMIT 1""",
             (normalized, normalized),
