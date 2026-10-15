@@ -4,28 +4,51 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #334155; }
-    body { margin: 0; }
-    .box { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px 14px; background: #f8fafc; }
-    .state { font-size: 0.9rem; font-weight: 600; }
-    .hint { margin-top: 5px; color: #64748b; font-size: 0.78rem; }
-    button { border: 0; border-radius: 8px; padding: 8px 12px; background: #2563eb; color: white; cursor: pointer; margin-top: 9px; }
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #e2e8f0; }
+    body { margin: 0; background: transparent; }
+    html, body { min-height: 100%; overflow: visible; }
+    .box { border: 1px solid #263449; border-radius: 16px; padding: 12px; background: #111827; box-shadow: 0 12px 30px rgba(2, 6, 23, .22); box-sizing: border-box; }
+    .camera-wrap { position: relative; overflow: hidden; border-radius: 11px; background: #020617; aspect-ratio: 16 / 9; }
+    .camera { width: 100%; height: 100%; min-height: 0; border-radius: 11px; background: #020617; object-fit: cover; transform: scaleX(-1); display: block; }
+    .camera-label { position: absolute; top: 9px; left: 9px; padding: 4px 8px; border-radius: 999px; background: rgba(2, 6, 23, .72); color: #cbd5e1; font-size: 0.7rem; font-weight: 700; letter-spacing: .02em; }
+    .camera-state { margin-top: 8px; color: #94a3b8; font-size: 0.76rem; }
+    .status-row { display: flex; align-items: center; gap: 7px; margin-top: 11px; color: #cbd5e1; font-size: .8rem; font-weight: 600; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .14); }
+    .state { margin-top: 9px; color: #f8fafc; font-size: 0.88rem; font-weight: 700; }
+    .transcript { margin-top: 8px; min-height: 34px; max-height: 70px; overflow: auto; padding: 8px 10px; border: 1px solid #263449; border-radius: 9px; background: #0b1220; color: #cbd5e1; font-size: .78rem; line-height: 1.4; }
+    .hint { margin-top: 7px; color: #94a3b8; font-size: 0.74rem; line-height: 1.35; }
+    button { border: 1px solid #334155; border-radius: 8px; padding: 7px 11px; background: #1e293b; color: #e2e8f0; cursor: pointer; margin-top: 9px; font-weight: 600; }
+    button:hover { background: #334155; }
   </style>
 </head>
 <body>
   <div class="box">
+    <div class="camera-wrap">
+      <video id="camera" class="camera" autoplay playsinline muted></video>
+      <div class="camera-label">LIVE CAMERA</div>
+    </div>
+    <div id="cameraState" class="camera-state">Camera starting…</div>
+    <div class="status-row"><span class="status-dot"></span><span id="micLabel">Microphone ready</span></div>
     <div id="state" class="state">Starting hands-free mode…</div>
-    <div class="hint">Allow microphone access. The browser submits your answer after a pause.</div>
+    <div id="transcript" class="transcript">Listening status will appear here.</div>
+    <div class="hint">Your microphone starts after the interviewer finishes speaking. Headphones help prevent echo.</div>
     <button id="retry">Start microphone now</button>
   </div>
   <script>
     const state = document.getElementById("state");
+    const camera = document.getElementById("camera");
+    const cameraState = document.getElementById("cameraState");
+    const transcript = document.getElementById("transcript");
+    const micLabel = document.getElementById("micLabel");
     const retry = document.getElementById("retry");
     let args = {}, speaking = false, listening = false, handled = false;
     let lastReplay = null;
     let audioContext, source, processor, stream, samples = [], startedAt = 0;
     let speakingDetected = false, lastVoiceAt = 0, levelTimer = null;
     let speakFallbackTimer = null;
+    let nativeRecognition = null, nativeFinalText = "", nativeSilenceTimer = null;
+    let cameraStream = null, cameraStartPromise = null;
+    const silenceMs = 1200;
 
     function send(type, extra = {}) {
       window.parent.postMessage({
@@ -37,6 +60,61 @@
     function setState(text, canRetry = true) {
       state.textContent = text;
       retry.hidden = !canRetry;
+      micLabel.textContent = text.toLowerCase().includes("listening") || text.toLowerCase().includes("hearing")
+        ? "Listening for your answer" : "Microphone ready";
+      if (!text.toLowerCase().includes("hearing")) transcript.textContent = text;
+    }
+    function setCameraState(text) {
+      cameraState.textContent = text;
+    }
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+        camera.srcObject = null;
+      }
+    }
+    async function startCamera() {
+      if (cameraStream) return true;
+      if (cameraStartPromise) return cameraStartPromise;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraState("Camera is unsupported in this browser. Use a current Chrome or Edge browser.");
+        send("camera_status", {status: "error", error: "NotSupportedError"});
+        return false;
+      }
+      setCameraState("Requesting camera permission…");
+      send("camera_status", {status: "requesting"});
+      cameraStartPromise = navigator.mediaDevices.getUserMedia({
+        video: {facingMode: "user"},
+        audio: false
+      }).then(streamValue => {
+        cameraStream = streamValue;
+        camera.srcObject = streamValue;
+        const track = streamValue.getVideoTracks()[0];
+        if (!track || track.readyState !== "live") {
+          throw new Error("Camera video track is not active.");
+        }
+        return new Promise((resolve, reject) => {
+          const playVideo = () => {
+            camera.play().then(() => {
+              setCameraState("Camera connected.");
+              send("camera_status", {status: "active", track: track.readyState});
+              resolve(true);
+            }).catch(reject);
+          };
+          if (camera.readyState >= HTMLMediaElement.HAVE_METADATA) playVideo();
+          else camera.onloadedmetadata = playVideo;
+        });
+      }).catch(error => {
+        stopCamera();
+        const detail = error && error.name ? error.name : "UnknownError";
+        setCameraState("Camera unavailable: " + detail + ". Allow camera access and reload the interview.");
+        send("camera_status", {status: "error", error: detail});
+        return false;
+      }).finally(() => {
+        cameraStartPromise = null;
+      });
+      return cameraStartPromise;
     }
     function encodeWav(input, sampleRate) {
       const buffer = new ArrayBuffer(44 + input.length * 2);
@@ -52,9 +130,84 @@
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
       return btoa(binary);
     }
-    async function listen() {
-      if (!args.active || listening || speaking) return;
-      if (handled) return;
+    function nativeSpeechAvailable() {
+      return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+    }
+    function stopNativeRecognition() {
+      clearTimeout(nativeSilenceTimer);
+      nativeSilenceTimer = null;
+      if (nativeRecognition) {
+        nativeRecognition.onend = null;
+        nativeRecognition.stop();
+        nativeRecognition = null;
+      }
+      listening = false;
+    }
+    function finishNativeRecognition() {
+      clearTimeout(nativeSilenceTimer);
+      nativeSilenceTimer = null;
+      const text = nativeFinalText.trim();
+      stopNativeRecognition();
+      if (!text || handled) {
+        setState("No speech was recognized. Press Start / retry microphone.", true);
+        return;
+      }
+      handled = true;
+      setState("Answer captured.");
+      send("answer", {text});
+    }
+    function listenWithNativeSpeech() {
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      nativeRecognition = new Recognition();
+      nativeRecognition.lang = args.language || "en-IN";
+      nativeRecognition.continuous = true;
+      nativeRecognition.interimResults = true;
+      nativeFinalText = "";
+      listening = true;
+      nativeRecognition.onstart = () => setState("Listening for your answer…");
+      nativeRecognition.onresult = event => {
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const text = event.results[i][0].transcript;
+          if (event.results[i].isFinal) nativeFinalText += text + " ";
+          else interim += text;
+        }
+        const visible = (nativeFinalText + interim).trim();
+        if (visible) {
+          state.textContent = "Listening for your answer…";
+          transcript.textContent = visible;
+          micLabel.textContent = "Listening for your answer";
+        }
+        clearTimeout(nativeSilenceTimer);
+        nativeSilenceTimer = setTimeout(finishNativeRecognition, silenceMs);
+      };
+      nativeRecognition.onerror = event => {
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          setState("Browser speech recognition permission was denied. Retrying with microphone recording.", true);
+          stopNativeRecognition();
+          listenWithRecorder();
+        } else if (event.error !== "aborted") {
+          setState("Browser speech recognition is unavailable. Retrying with microphone recording.", true);
+          stopNativeRecognition();
+          listenWithRecorder();
+        }
+      };
+      nativeRecognition.onend = () => {
+        if (listening && !handled) finishNativeRecognition();
+      };
+      try {
+        nativeRecognition.start();
+      } catch (error) {
+        stopNativeRecognition();
+        listenWithRecorder();
+      }
+    }
+    function listenWithRecorder() {
+      if (!args.active || listening || speaking || handled) return;
+      listening = true;
+      listenRecorder();
+    }
+    async function listenRecorder() {
       try {
         if (!stream) {
           stream = await navigator.mediaDevices.getUserMedia({audio: {
@@ -74,22 +227,31 @@
             const level = Math.sqrt(sum / data.length);
             if (level > 0.006) { speakingDetected = true; lastVoiceAt = Date.now(); }
             state.textContent = speakingDetected
-              ? "Hearing you… microphone active"
-              : "Listening… start speaking (mic level " + level.toFixed(3) + ")";
-            if (speakingDetected && Date.now() - lastVoiceAt > 1600 && Date.now() - startedAt > 900) stopListening();
+              ? "Listening for your answer…"
+              : "Listening… start speaking";
+            micLabel.textContent = speakingDetected ? "Listening for your answer" : "Microphone ready";
+            if (speakingDetected && Date.now() - lastVoiceAt > silenceMs && Date.now() - startedAt > 900) stopListening();
           };
           const silentOutput = audioContext.createGain();
           silentOutput.gain.value = 0;
           source.connect(processor); processor.connect(silentOutput); silentOutput.connect(audioContext.destination);
         }
         if (audioContext.state === "suspended") await audioContext.resume();
-        samples = []; speakingDetected = false; startedAt = Date.now(); lastVoiceAt = startedAt; listening = true;
-        setState("Listening… start speaking. I’ll stop after you pause.");
+        samples = []; speakingDetected = false; startedAt = Date.now(); lastVoiceAt = startedAt;
+        setState("Listening for your answer… I’ll stop after you pause.");
       } catch (error) {
+        listening = false;
         setState("Microphone could not start. Allow access and press Start / retry microphone.", true);
       }
     }
+    async function listen() {
+      if (!args.active || listening || speaking) return;
+      if (handled) return;
+      if (nativeSpeechAvailable()) listenWithNativeSpeech();
+      else listenWithRecorder();
+    }
     function stopListening() {
+      if (nativeRecognition) { finishNativeRecognition(); return; }
       if (!listening || handled) return;
       listening = false;
       const sampleRate = audioContext ? audioContext.sampleRate : 44100;
@@ -129,7 +291,17 @@
     }
     function render(data) {
       args = data.args || {};
-      if (!args.active) { window.speechSynthesis.cancel(); if (listening) stopListening(); setState("Live mode is paused."); return; }
+      if (!args.active) {
+        window.speechSynthesis.cancel();
+        if (nativeRecognition) stopNativeRecognition();
+        if (listening) { listening = false; }
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stopCamera();
+        setCameraState("Camera stopped.");
+        setState("Live mode is paused.");
+        return;
+      }
+      startCamera();
       if (lastReplay === args.replay && speaking) return;
       lastReplay = args.replay;
       handled = false;
@@ -156,9 +328,18 @@
       window.parent.postMessage({
         isStreamlitMessage: true,
         type: "streamlit:setFrameHeight",
-        height: 112
+        height: Math.ceil(document.body.scrollHeight + 8)
       }, "*");
     });
+    const resizeObserver = new ResizeObserver(() => {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setFrameHeight",
+        height: Math.ceil(document.body.scrollHeight + 8)
+      }, "*");
+    });
+    resizeObserver.observe(document.body);
+    window.addEventListener("pagehide", stopCamera);
   </script>
 </body>
 </html>

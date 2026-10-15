@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #e2e8f0; }
+    html, body { margin: 0; min-height: 100%; background: transparent; overflow: visible; }
+    .card { padding: 12px; border: 1px solid #263449; border-radius: 16px; background: #111827; }
+    .video-wrap { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 11px; background: #020617; }
+    video { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); background: #020617; }
+    .label { position: absolute; top: 9px; left: 9px; padding: 4px 8px; border-radius: 999px; background: rgba(2,6,23,.75); font-size: .7rem; font-weight: 700; }
+    .status { margin-top: 9px; min-height: 19px; color: #94a3b8; font-size: .78rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    button, select { border: 1px solid #334155; border-radius: 8px; padding: 7px 10px; background: #1e293b; color: #e2e8f0; font: inherit; font-size: .78rem; }
+    button { cursor: pointer; font-weight: 700; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    select { min-width: 180px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="video-wrap">
+      <video id="video" autoplay playsinline muted></video>
+      <div class="label">CAMERA PREVIEW</div>
+    </div>
+    <div id="status" class="status">Camera is off. Click START.</div>
+    <div class="actions">
+      <button id="start" type="button">START</button>
+      <button id="stop" type="button" disabled>STOP</button>
+      <select id="devices" aria-label="Select camera device">
+        <option value="">SELECT DEVICE</option>
+      </select>
+    </div>
+  </div>
+  <script>
+    const video = document.getElementById("video");
+    const status = document.getElementById("status");
+    const start = document.getElementById("start");
+    const stop = document.getElementById("stop");
+    const devices = document.getElementById("devices");
+    let stream = null, starting = null;
+
+    function send(extra) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setComponentValue",
+        value: {at: Date.now(), ...extra}
+      }, "*");
+    }
+    function setStatus(text, state, extra = {}) {
+      status.textContent = text;
+      send({status: state, ...extra});
+    }
+    function stopCamera(notify = true) {
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      video.srcObject = null;
+      start.disabled = false;
+      stop.disabled = true;
+      if (notify) setStatus("Camera is off. Click START.", "stopped");
+    }
+    async function refreshDevices() {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const list = await navigator.mediaDevices.enumerateDevices();
+      const current = devices.value;
+      devices.replaceChildren(new Option("SELECT DEVICE", ""));
+      list.filter(item => item.kind === "videoinput").forEach((item, index) => {
+        devices.appendChild(new Option(item.label || `Camera ${index + 1}`, item.deviceId));
+      });
+      if ([...devices.options].some(option => option.value === current)) devices.value = current;
+    }
+    async function startCamera() {
+      if (stream) return true;
+      if (starting) return starting;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("Camera is not supported by this browser.", "error", {error: "NotSupportedError"});
+        return false;
+      }
+      start.disabled = true;
+      setStatus("Requesting camera permission…", "requesting");
+      const selected = devices.value;
+      const constraints = {video: selected ? {deviceId: {exact: selected}} : {facingMode: "user"}, audio: false};
+      starting = navigator.mediaDevices.getUserMedia(constraints).then(value => {
+        stream = value;
+        const track = value.getVideoTracks()[0];
+        if (!track || track.readyState !== "live") throw new Error("No live video track.");
+        video.srcObject = value;
+        return new Promise((resolve, reject) => {
+          const ready = () => {
+            if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+              reject(new Error("Camera metadata has zero dimensions."));
+              return;
+            }
+            video.play().then(() => {
+              stop.disabled = false;
+              setStatus("Camera is active and ready.", "active", {
+                track: track.readyState,
+                videoWidth: video.videoWidth,
+                videoHeight: video.videoHeight,
+              });
+              refreshDevices();
+              resolve(true);
+            }).catch(reject);
+          };
+          video.addEventListener("loadedmetadata", ready, {once: true});
+          if (video.readyState >= HTMLMediaElement.HAVE_METADATA) ready();
+        });
+      }).catch(error => {
+        stopCamera(false);
+        const detail = error?.name || error?.message || "UnknownError";
+        setStatus(`Camera could not start: ${detail}`, "error", {error: detail});
+        return false;
+      }).finally(() => { starting = null; });
+      return starting;
+    }
+    start.onclick = startCamera;
+    stop.onclick = () => stopCamera();
+    devices.onchange = () => { if (stream) { stopCamera(false); startCamera(); } };
+    navigator.mediaDevices?.addEventListener?.("devicechange", refreshDevices);
+    window.addEventListener("pagehide", () => stopCamera(false));
+    window.addEventListener("message", event => {
+      if (event.data?.type === "streamlit:render") refreshDevices();
+    });
+    window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1}, "*");
+    window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 370}, "*");
+    refreshDevices();
+  </script>
+</body>
+</html>
