@@ -10,6 +10,7 @@ import io
 import base64
 import binascii
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 import streamlit.components.v1 as components
@@ -18,11 +19,12 @@ import streamlit.components.v1 as components
 logger = logging.getLogger(__name__)
 
 _camera_precheck_component = components.declare_component(
-    "camera_precheck",
+    "camera_precheck_v2",
     path=str(Path(__file__).parent / "frontend" / "camera_precheck"),
 )
 
 
+@lru_cache(maxsize=1)
 def available() -> tuple[bool, str]:
     try:
         import streamlit_mic_recorder  # noqa: F401
@@ -88,9 +90,18 @@ def live_stream(
         return None
 
 
-def camera_precheck(key: str = "camera_precheck") -> dict:
+def camera_precheck(
+    key: str = "camera_precheck",
+    start_request: int = 0,
+    stop_request: int = 0,
+) -> dict:
     """Render the browser-owned pre-check camera and return its verified state."""
-    return _camera_precheck_component(key=key, default={})
+    return _camera_precheck_component(
+        key=key,
+        start_request=start_request,
+        stop_request=stop_request,
+        default={},
+    )
 
 
 def transcribe_audio(audio_bytes: bytes, language: str = "en-IN") -> tuple[str | None, str | None]:
@@ -138,6 +149,7 @@ def transcribe_base64_wav(encoded_audio: str, language: str = "en-IN") -> tuple[
         return None, "The recorded audio was invalid; type your answer instead."
 
 
+@lru_cache(maxsize=128)
 def question_audio(text: str) -> bytes | None:
     """Create browser-playable MP3 speech with gTTS when available."""
     try:
