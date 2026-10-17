@@ -92,14 +92,20 @@ recording** uses Google Speech Recognition through `SpeechRecognition`.
 Transcription requires an internet connection and may fail for noisy audio;
 the answer can always be typed or edited in the text box.
 
-The camera preview is an optional self-check for posture, framing, and looking
-naturally toward the camera. It is guidance only: the app does not perform or
-claim to perform eye tracking.
+The live camera preview remains browser-local. When the optional MediaPipe
+Face Mesh script is available, the live component performs lightweight,
+client-side face/gaze guidance and shows a reminder only after a sustained
+look away; frames are not uploaded by this feature. If the script cannot be
+loaded, the camera and interview continue without eye-contact reminders.
 
 Use **Live hands-free mode** for a continuous interviewer conversation. The
 agent speaks the current question, keeps the microphone open, detects when you
 stop speaking, transcribes the answer, evaluates it, and advances
-automatically. A first click is still required by Chrome/Edge to grant
+automatically. A short thinking pause is allowed before an answer is
+finalized, and a single long-pause check-in is shown with a cooldown. The live
+component also provides conservative, client-side background-noise guidance
+when its existing recorder stream is available; it does not save raw audio for
+that feature. A first click is still required by Chrome/Edge to grant
 microphone permission. Headphones are recommended so the agent's voice is not
 captured as your answer.
 
