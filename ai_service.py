@@ -129,14 +129,32 @@ def generate_questions(role: str, level: str, interview_type: str, count: int, m
     return questions[:count]
 
 
-def generate_follow_up(question: str, answer: str, model: str, topic: str = "") -> str:
-    return "What measurable result, trade-off, or lesson would you add to that answer?"
+def generate_follow_up(question: str, answer: str, model: str, topic: str = "", context: str = "") -> str:
+    """Create a deterministic, answer-specific follow-up when fast mode is used."""
+    normalized = answer.casefold()
+    if "python" in normalized:
+        return "What did your Python project do, and which Python libraries did you use?"
+    if any(token in normalized for token in ("data", "dataset", "csv", "analytics")):
+        return "How did you handle missing values or invalid data in that work?"
+    if any(token in normalized for token in ("project", "built", "developed", "implemented")):
+        return "What was the most difficult part of that project, and how did you solve it?"
+    if any(token in normalized for token in ("team", "collaborat", "colleague")):
+        return "What was your specific contribution, and how did you measure its impact?"
+    if any(token in normalized for token in ("because", "trade-off", "tradeoff", "chose")):
+        return "What alternatives did you consider, and why was your approach the best fit?"
+    if "tell me about yourself" in question.casefold():
+        return "Which experience best demonstrates the skills you would bring to this role?"
+    return "What specific example or measurable result supports that answer?"
 
 
-def evaluate_answer(question: str, answer: str, model: str, fast: bool = False) -> dict[str, Any]:
+def evaluate_answer(question: str, answer: str, model: str, fast: bool = False,
+                    context: str = "") -> dict[str, Any]:
     prompt = (f"Score this interview answer from 0 to 10. Q: {question}\nA: {answer}\n"
+              f"Interview context: {context}\n"
               "Return compact JSON: score, feedback, suggestion, follow_up_question. "
-              "Keep feedback and suggestion under 25 words each.")
+              "Keep feedback and suggestion under 25 words each. "
+              "Ask one relevant follow-up based on the answer, role, level, and topics; "
+              "never repeat the current or an earlier question.")
     response = None if fast else _ollama(prompt, model, timeout=8)
     if response:
         try:
@@ -144,7 +162,7 @@ def evaluate_answer(question: str, answer: str, model: str, fast: bool = False) 
             parsed = json.loads(text)
             if all(key in parsed for key in ("score", "feedback", "suggestion")):
                 parsed["score"] = max(0, min(10, float(parsed["score"])))
-                parsed.setdefault("follow_up_question", generate_follow_up(question, answer, model))
+                parsed.setdefault("follow_up_question", generate_follow_up(question, answer, model, context=context))
                 return parsed
         except (ValueError, json.JSONDecodeError):
             pass
@@ -155,7 +173,7 @@ def evaluate_answer(question: str, answer: str, model: str, fast: bool = False) 
         "score": score,
         "feedback": "Good starting point. Add a concrete example and explain the result to make your answer more persuasive.",
         "suggestion": "Use a compact STAR structure: situation, task, action, and measurable result.",
-        "follow_up_question": generate_follow_up(question, answer, model),
+        "follow_up_question": generate_follow_up(question, answer, model, context=context),
     }
 
 
