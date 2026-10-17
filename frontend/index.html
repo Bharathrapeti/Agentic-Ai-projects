@@ -16,6 +16,7 @@
     .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .14); }
     .state { margin-top: 9px; color: #f8fafc; font-size: 0.88rem; font-weight: 700; }
     .transcript { margin-top: 8px; min-height: 34px; max-height: 70px; overflow: auto; padding: 8px 10px; border: 1px solid #263449; border-radius: 9px; background: #0b1220; color: #cbd5e1; font-size: .78rem; line-height: 1.4; }
+    .reminder { display: none; margin-top: 8px; padding: 7px 9px; border: 1px solid #854d0e; border-radius: 9px; background: rgba(120, 53, 15, .25); color: #fde68a; font-size: .75rem; line-height: 1.35; }
     .hint { margin-top: 7px; color: #94a3b8; font-size: 0.74rem; line-height: 1.35; }
     button { border: 1px solid #334155; border-radius: 8px; padding: 7px 11px; background: #1e293b; color: #e2e8f0; cursor: pointer; margin-top: 9px; font-weight: 600; }
     button:hover { background: #334155; }
@@ -31,6 +32,7 @@
     <div class="status-row"><span class="status-dot"></span><span id="micLabel">Microphone ready</span></div>
     <div id="state" class="state">Starting hands-free mode…</div>
     <div id="transcript" class="transcript">Listening status will appear here.</div>
+    <div id="reminder" class="reminder" role="status" aria-live="polite"></div>
     <div class="hint">Your microphone starts after the interviewer finishes speaking. Headphones help prevent echo.</div>
     <button id="retry">Start microphone now</button>
   </div>
@@ -43,12 +45,24 @@
     const retry = document.getElementById("retry");
     let args = {}, speaking = false, listening = false, handled = false;
     let lastReplay = null;
+    let lastQuestionToken = null;
     let audioContext, source, processor, stream, samples = [], startedAt = 0;
     let speakingDetected = false, lastVoiceAt = 0, levelTimer = null;
     let speakFallbackTimer = null;
     let nativeRecognition = null, nativeFinalText = "", nativeSilenceTimer = null;
+    let waitingPromptTimer = null;
+    let waitingPromptShown = false, lastWaitingReminderAt = 0;
     let cameraStream = null, cameraStartPromise = null;
-    const silenceMs = 1200;
+    let analyser = null, noiseTimer = null, noiseStartedAt = 0, lastNoiseReminderAt = 0;
+    let faceMesh = null, faceTrackingLoading = null, faceTimer = null;
+    let awayStartedAt = 0, lastEyeReminderAt = 0;
+    const reminder = document.getElementById("reminder");
+    const silenceMs = 2800;
+    const waitingPromptMs = 10000;
+    const waitingCooldownMs = 30000;
+    const eyeAwayMs = 10000;
+    const reminderCooldownMs = 45000;
+    const noiseSustainMs = 4000;
 
     function send(type, extra = {}) {
       window.parent.postMessage({
@@ -66,6 +80,13 @@
     }
     function setCameraState(text) {
       cameraState.textContent = text;
+    }
+    function showReminder(text) {
+      reminder.textContent = text;
+      reminder.style.display = "block";
+      setTimeout(() => {
+        if (reminder.textContent === text) reminder.style.display = "none";
+      }, 9000);
     }
     function stopCamera() {
       if (cameraStream) {
@@ -107,6 +128,8 @@
         });
       }).catch(error => {
         stopCamera();
+        stopFaceTracking();
+        stopNoiseMonitoring();
         const detail = error && error.name ? error.name : "UnknownError";
         setCameraState("Camera unavailable: " + detail + ". Allow camera access and reload the interview.");
         send("camera_status", {status: "error", error: detail});
@@ -143,9 +166,111 @@
       }
       listening = false;
     }
+    function clearWaitingPrompts() {
+      clearTimeout(waitingPromptTimer);
+      waitingPromptTimer = null;
+      waitingPromptShown = false;
+    }
+    function scheduleWaitingPrompts() {
+      clearWaitingPrompts();
+      waitingPromptTimer = setTimeout(() => {
+        if (listening && !speakingDetected && !handled
+            && Date.now() - lastWaitingReminderAt >= waitingCooldownMs) {
+          waitingPromptShown = true;
+          lastWaitingReminderAt = Date.now();
+          showReminder("Take your time. Would you like a moment to think about your answer?");
+        }
+      }, waitingPromptMs);
+    }
+    function stopNoiseMonitoring() {
+      clearTimeout(noiseTimer);
+      noiseTimer = null;
+      noiseStartedAt = 0;
+      analyser = null;
+    }
+    function monitorNoise() {
+      if (!analyser || !listening || speaking || handled || speakingDetected) {
+        noiseStartedAt = 0;
+        return;
+      }
+      const values = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(values);
+      let sum = 0;
+      values.forEach(value => {
+        const normalized = (value - 128) / 128;
+        sum += normalized * normalized;
+      });
+      const rms = Math.sqrt(sum / values.length);
+      if (rms > 0.08) {
+        if (!noiseStartedAt) noiseStartedAt = Date.now();
+        if (Date.now() - noiseStartedAt >= noiseSustainMs
+            && Date.now() - lastNoiseReminderAt >= reminderCooldownMs) {
+          lastNoiseReminderAt = Date.now();
+          showReminder("I’m hearing some background noise. A quieter place may help us continue.");
+          noiseStartedAt = 0;
+        }
+      } else {
+        noiseStartedAt = 0;
+      }
+      noiseTimer = setTimeout(monitorNoise, 250);
+    }
+    function loadFaceTracking() {
+      if (faceTrackingLoading || faceMesh) return faceTrackingLoading;
+      if (!camera || !window.fetch) return Promise.resolve(false);
+      faceTrackingLoading = new Promise(resolve => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js";
+        script.onload = () => {
+          if (!window.FaceMesh) { resolve(false); return; }
+          faceMesh = new window.FaceMesh({
+            locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+          });
+          faceMesh.setOptions({maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: .6, minTrackingConfidence: .6});
+          faceMesh.onResults(results => {
+            const landmarks = results.multiFaceLandmarks?.[0];
+            if (!landmarks) { awayStartedAt = 0; return; }
+            const left = landmarks[33], right = landmarks[263];
+            const nose = landmarks[1];
+            const eyeSpan = Math.max(.001, right.x - left.x);
+            const gaze = (nose.x - left.x) / eyeSpan;
+            const lookingForward = gaze > .28 && gaze < .72;
+            if (lookingForward) { awayStartedAt = 0; return; }
+            if (!awayStartedAt) awayStartedAt = Date.now();
+            if (Date.now() - awayStartedAt >= eyeAwayMs
+                && Date.now() - lastEyeReminderAt >= reminderCooldownMs
+                && !speaking && !handled) {
+              lastEyeReminderAt = Date.now();
+              showReminder("Please try to maintain eye contact with the camera. It will help you practise for a real interview.");
+              awayStartedAt = 0;
+            }
+          });
+          resolve(true);
+        };
+        script.onerror = () => resolve(false);
+        document.head.appendChild(script);
+      });
+      return faceTrackingLoading;
+    }
+    async function trackFace() {
+      if (speaking) { awayStartedAt = 0; return; }
+      if (!faceMesh || !cameraStream || !camera.videoWidth) return;
+      try { await faceMesh.send({image: camera}); } catch (error) { /* optional enhancement */ }
+    }
+    function startFaceTracking() {
+      loadFaceTracking().then(available => {
+        if (!available || faceTimer) return;
+        faceTimer = setInterval(trackFace, 250);
+      });
+    }
+    function stopFaceTracking() {
+      clearInterval(faceTimer);
+      faceTimer = null;
+      awayStartedAt = 0;
+    }
     function finishNativeRecognition() {
       clearTimeout(nativeSilenceTimer);
       nativeSilenceTimer = null;
+      clearWaitingPrompts();
       const text = nativeFinalText.trim();
       stopNativeRecognition();
       if (!text || handled) {
@@ -177,6 +302,7 @@
           state.textContent = "Listening for your answer…";
           transcript.textContent = visible;
           micLabel.textContent = "Listening for your answer";
+          clearWaitingPrompts();
         }
         clearTimeout(nativeSilenceTimer);
         nativeSilenceTimer = setTimeout(finishNativeRecognition, silenceMs);
@@ -193,7 +319,10 @@
         }
       };
       nativeRecognition.onend = () => {
-        if (listening && !handled) finishNativeRecognition();
+        if (listening && !handled) {
+          clearTimeout(nativeSilenceTimer);
+          nativeSilenceTimer = setTimeout(finishNativeRecognition, silenceMs);
+        }
       };
       try {
         nativeRecognition.start();
@@ -205,6 +334,7 @@
     function listenWithRecorder() {
       if (!args.active || listening || speaking || handled) return;
       listening = true;
+      scheduleWaitingPrompts();
       listenRecorder();
     }
     async function listenRecorder() {
@@ -218,6 +348,9 @@
           }});
           audioContext = new AudioContext();
           source = audioContext.createMediaStreamSource(stream);
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 1024;
+          source.connect(analyser);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
           processor.onaudioprocess = event => {
             if (!listening) return;
@@ -225,11 +358,17 @@
             samples.push(...data);
             let sum = 0; for (const value of data) sum += value * value;
             const level = Math.sqrt(sum / data.length);
-            if (level > 0.006) { speakingDetected = true; lastVoiceAt = Date.now(); }
-            state.textContent = speakingDetected
-              ? "Listening for your answer…"
-              : "Listening… start speaking";
-            micLabel.textContent = speakingDetected ? "Listening for your answer" : "Microphone ready";
+            if (level > 0.006) {
+              speakingDetected = true;
+              lastVoiceAt = Date.now();
+              clearWaitingPrompts();
+            }
+            if (!waitingPromptShown) {
+              state.textContent = speakingDetected
+                ? "Listening for your answer…"
+                : "Listening… start speaking";
+              micLabel.textContent = speakingDetected ? "Listening for your answer" : "Microphone ready";
+            }
             if (speakingDetected && Date.now() - lastVoiceAt > silenceMs && Date.now() - startedAt > 900) stopListening();
           };
           const silentOutput = audioContext.createGain();
@@ -239,6 +378,8 @@
         if (audioContext.state === "suspended") await audioContext.resume();
         samples = []; speakingDetected = false; startedAt = Date.now(); lastVoiceAt = startedAt;
         setState("Listening for your answer… I’ll stop after you pause.");
+        scheduleWaitingPrompts();
+        monitorNoise();
       } catch (error) {
         listening = false;
         setState("Microphone could not start. Allow access and press Start / retry microphone.", true);
@@ -254,6 +395,8 @@
       if (nativeRecognition) { finishNativeRecognition(); return; }
       if (!listening || handled) return;
       listening = false;
+      clearWaitingPrompts();
+      stopNoiseMonitoring();
       const sampleRate = audioContext ? audioContext.sampleRate : 44100;
       if (samples.length < 3000) { setState("No speech level detected. Press Start / retry microphone.", true); return; }
       handled = true; setState("Answer captured. Converting to text…");
@@ -302,7 +445,14 @@
         return;
       }
       startCamera();
-      if (lastReplay === args.replay && speaking) return;
+      startFaceTracking();
+      const questionToken = JSON.stringify({
+        question: args.question || "",
+        greeting: args.greeting || "",
+        replay: args.replay || 0
+      });
+      if (questionToken === lastQuestionToken) return;
+      lastQuestionToken = questionToken;
       lastReplay = args.replay;
       handled = false;
       const greeting = args.greeting || "";
