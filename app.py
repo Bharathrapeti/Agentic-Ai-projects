@@ -19,27 +19,31 @@ from live_interview import live_interview
 
 logger = logging.getLogger(__name__)
 
-try:
-    from streamlit_webrtc import webrtc_streamer  # noqa: F401
-
-    WEBRTC_AVAILABLE = True
-except ImportError:
-    WEBRTC_AVAILABLE = False
-
 st.set_page_config(page_title="Interview Coach", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
-database.init_db()
+
+
+@st.cache_resource(show_spinner=False)
+def _initialize_database() -> bool:
+    database.init_db()
+    return True
+
+
+_initialize_database()
 
 st.markdown("""<style>
 .block-container {max-width: 1220px; padding-top: 1.5rem;}
 /* Keep the workspace focused on the interview instead of deployment controls. */
 .stDeployButton, [data-testid="stAppDeployButton"] {display: none !important;}
-.hero {padding: 2rem 2.2rem; border-radius: 22px; background: linear-gradient(120deg,#172554,#312e81 55%,#4338ca); color:white; margin-bottom:1.2rem; box-shadow:0 14px 35px rgba(30,41,99,.18);}
+.hero {padding: 2rem 2.2rem; border-radius: 28px; overflow: hidden; background: linear-gradient(120deg,#172554,#312e81 55%,#4338ca); color:white; margin-bottom:1.2rem; box-shadow:0 14px 35px rgba(30,41,99,.18);}
 .hero h1 {font-size:2.4rem; margin-bottom:.35rem;}
 .hero p {font-size:1.05rem; opacity:.9; margin:0;}
 .feature-card {padding:1rem 1.1rem; border:1px solid #e2e8f0; border-radius:16px; background:#fff; min-height:108px; box-shadow:0 4px 15px rgba(15,23,42,.04);}
 .feature-card strong {display:block; margin-bottom:.3rem; color:#0f172a;}
 .feature-card span {color:#64748b; font-size:.9rem;}
 .section-card {padding:1.2rem 1.35rem; border-radius:18px; background:#f8fafc; border:1px solid #e2e8f0; margin:1rem 0;}
+.setup-intro {padding:.85rem 1.1rem; border:1px solid #334155; border-radius:14px; background:linear-gradient(120deg,#111827,#172554); margin:.85rem 0 1rem; box-shadow:0 8px 22px rgba(2,6,23,.16);}
+.setup-intro h3 {margin:0 0 .25rem; color:#f8fafc; font-size:1.05rem; line-height:1.3;}
+.setup-intro p {margin:0; color:#cbd5e1; font-size:.86rem; line-height:1.45;}
 .muted {color:#64748b; font-size:.9rem;}
 .live-shell {padding:1rem 1.1rem; border:1px solid #263449; border-radius:20px; background:linear-gradient(145deg,#0f172a,#111827); margin:.8rem 0 1.1rem;}
 .live-kicker {color:#94a3b8; font-size:.78rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; margin-bottom:.45rem;}
@@ -53,7 +57,7 @@ st.markdown("""<style>
 
 
 def reset():
-    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay", "password_reset", "setup_details", "setup_submitted", "camera_confirmed", "voice_test_passed", "voice_test_text", "voice_test_error"):
+    for key in ("session_id", "questions", "current", "evaluations", "report", "submitted", "topics", "initial_count", "adaptive_mode", "live_mode", "live_transcript", "live_last_event", "live_replay", "live_asked_questions", "level", "password_reset", "setup_details", "setup_submitted", "camera_confirmed", "voice_test_passed", "voice_test_text", "voice_test_error"):
         st.session_state.pop(key, None)
 
 
@@ -285,14 +289,54 @@ def setup_view():
     f1.markdown('<div class="feature-card"><strong>🎙️ Real conversation</strong><span>Speak naturally with hands-free voice mode and live camera practice.</span></div>', unsafe_allow_html=True)
     f2.markdown('<div class="feature-card"><strong>🧠 Personal coaching</strong><span>Get targeted feedback, follow-up questions, and practical next steps.</span></div>', unsafe_allow_html=True)
     f3.markdown('<div class="feature-card"><strong>📈 Track your growth</strong><span>Save your attempts and see how your interview performance improves.</span></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-card"><h3>Build your practice session</h3><p class="muted">Tell the coach what you want to practise. You can change these settings for every attempt.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="setup-intro"><h3>Your Career. Your Interview. Your Growth.</h3><p>Practice role-specific questions, experience realistic AI-powered interviews, and receive personalized feedback to improve your answers and build confidence.</p></div>', unsafe_allow_html=True)
     with st.form("setup"):
         name = st.text_input("👋 What should the interviewer call you?", value=st.session_state.get("auth_name", ""), placeholder="Enter your name")
         c1, c2 = st.columns(2)
-        role = c1.text_input("🎯 Target role", "Software Engineer")
+        role_options = [
+            "Software Engineer",
+            "Full-Stack Developer",
+            "Frontend Developer",
+            "Backend Developer",
+            "Web Developer",
+            "Mobile App Developer",
+            "Java Developer",
+            "Python Developer",
+            "Data Engineer",
+            "Data Scientist",
+            "AI Engineer",
+            "Machine Learning Engineer",
+            "Generative AI Engineer",
+            "Data Analyst",
+            "DevOps Engineer",
+            "Cloud Engineer",
+            "Cybersecurity Engineer",
+            "QA Automation Engineer",
+            "Embedded Systems Engineer",
+            "Blockchain Developer",
+            "Game Developer",
+            "Other / Custom Role",
+        ]
+        selected_role = c1.selectbox(
+            "🎯 Target role",
+            role_options,
+            index=0,
+            key="target_role_selector",
+        )
+        custom_role = ""
+        if selected_role == "Other / Custom Role":
+            custom_role = c1.text_input(
+                "Custom engineering role",
+                key="custom_target_role",
+                placeholder="e.g. Robotics Software Engineer",
+            )
+        role = custom_role.strip() if selected_role == "Other / Custom Role" else selected_role
         level = c2.selectbox("📊 Experience level", ["Entry level", "Mid level", "Senior", "Staff / Lead"])
         c3, c4 = st.columns(2)
-        interview_type = c3.selectbox("🧭 Interview focus", ["Mixed", "Technical", "Behavioral"])
+        interview_type = c3.selectbox(
+            "🧭 Interview focus",
+            ["Mixed", "Technical", "Behavioral", "Coding", "System Design"],
+        )
         count = c4.slider("📝 Starting questions", 3, 10, 5)
         topics = st.multiselect(
             "💻 What would you like to practise?",
@@ -341,8 +385,11 @@ def setup_view():
             st.caption("Install a model with `ollama pull <model-name>` before using it.")
         submitted = st.form_submit_button("Submit Details", type="primary", use_container_width=True)
     if submitted:
-        if not name.strip() or not role.strip():
-            st.error("Please provide your name and target role.")
+        if not name.strip():
+            st.error("Please provide your name.")
+            return
+        if not role.strip():
+            st.error("Please provide your name and a custom target role.")
             return
         st.session_state.setup_details = {
             "name": name.strip(),
@@ -457,11 +504,12 @@ def camera_precheck_view():
             database.save_questions(session_id, questions)
         st.session_state.update(
             session_id=session_id, questions=questions, current=0, evaluations=[],
-            model=details["model"], role=details["role"], name=details["name"],
+            model=details["model"], role=details["role"], name=details["name"], level=details["level"],
             topics=details["topics"], initial_count=details["count"],
             adaptive_mode=details["adaptive_mode"], live_mode=details["live_mode"],
             language=details["language"], live_transcript=[], live_last_event=None,
-            live_replay=0, welcome_played=False,
+            live_replay=0, live_asked_questions=[item.casefold() for item in questions],
+            welcome_played=False,
         )
         st.session_state.pop("setup_details", None)
         st.session_state.pop("setup_submitted", None)
@@ -580,8 +628,14 @@ def interview_view():
                     st.session_state.live_last_event = None
                     st.rerun()
                 with st.spinner("Evaluating your answer…"):
+                    interview_context = (
+                        f"Role: {st.session_state.role}; "
+                        f"Experience level: {st.session_state.get('level', 'unspecified')}; "
+                        f"Topics: {', '.join(st.session_state.topics)}"
+                    )
                     evaluation = ai_service.evaluate_answer(
-                        question, answer, st.session_state.model, fast=True
+                        question, answer, st.session_state.model, fast=True,
+                        context=interview_context,
                     )
                 question_rows = database.get_questions(st.session_state.session_id)
                 database.save_answer(question_rows[index]["question_id"], {"answer": answer, **evaluation})
@@ -589,9 +643,16 @@ def interview_view():
                 st.session_state.live_transcript.append({"question": question, "answer": answer, "evaluation": evaluation})
                 follow_up = evaluation.get("follow_up_question")
                 max_questions = 50 if st.session_state.get("adaptive_mode") else 2 * st.session_state.initial_count
-                if follow_up and len(st.session_state.questions) < max_questions:
+                asked_questions = st.session_state.setdefault("live_asked_questions", [])
+                follow_up_key = follow_up.strip().casefold() if follow_up else ""
+                if (
+                    follow_up
+                    and follow_up_key not in asked_questions
+                    and len(st.session_state.questions) < max_questions
+                ):
                     database.save_question(st.session_state.session_id, follow_up)
                     st.session_state.questions.append(follow_up)
+                    asked_questions.append(follow_up_key)
                 st.session_state.current += 1
                 st.rerun()
         if st.button("Stop live mode and switch to typed answers", key=f"stop_live_{index}"):
@@ -613,9 +674,8 @@ def interview_view():
     with st.expander("Optional camera / audio capture"):
         st.caption("Camera guidance: use the preview to self-check upright posture, framing, and natural eye contact with the camera. "
                    "This app does not claim to perform eye tracking or assess appearance.")
-        if WEBRTC_AVAILABLE:
-            capture.live_stream(f"live_{index}")
-        else:
+        live_capture = capture.live_stream(f"live_{index}")
+        if live_capture is None:
             st.camera_input("Camera preview", key=f"camera_{index}")
             st.info("Install streamlit-webrtc for a live camera/microphone preview.")
         if audio_ok:
